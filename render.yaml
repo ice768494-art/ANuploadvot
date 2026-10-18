@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: animenetworktamil-quality-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python code.py
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: DEFAULT_CHANNEL_ID
+        sync: false
