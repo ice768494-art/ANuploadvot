@@ -187,13 +187,11 @@ def make_caption(anime_name, episode_number):
     safe_name = html.escape(anime_name.upper())
     safe_episode = html.escape(episode_number)
     return (
-        "╭━━━『 🔥 NEW EPISODE 』━━━╮\n\n"
-        f"<blockquote>🎬 Anime: {safe_name}\n"
-        f"📺 Episode: {safe_episode}\n"
-        "🎧 Audio: Tamil</blockquote>\n\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
-        "📥 <b>DOWNLOAD LINKS</b>"
+    f"{safe_name} | தமிழ் Official Dub\n\n"
+    f"Season : 01 | Episode : {safe_episode}\n"
+    "‼️ Note - Click The Below Button to Get Episodes 👇"
     )
+       
 
 
 def make_keyboard(qualities):
