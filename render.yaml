@@ -1,16 +1,20 @@
 services:
   - type: web
-    name: animenetworktamil-quality-bot
+    name: anime-auto-publisher
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python code.py
-    healthCheckPath: /
+    startCommand: python main.py
+    plan: free
+    disk:
+      name: anime-bot-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: ADMIN_ID
+      - key: SOURCE_CHANNEL_ID
         sync: false
-      - key: MONGO_URI
+      - key: ADMIN_IDS
         sync: false
-      - key: DEFAULT_CHANNEL_ID
-        sync: false
+      - key: DATABASE_PATH
+        value: /var/data/anime_channels.sqlite3
