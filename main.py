@@ -19,12 +19,19 @@ from telegram.ext import (
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 SOURCE_CHANNEL_ID = os.getenv("SOURCE_CHANNEL_ID", "").strip()
+
 ADMIN_IDS = {
     int(value.strip())
     for value in os.getenv("ADMIN_IDS", "").split(",")
     if value.strip().lstrip("-").isdigit()
 }
-DATABASE_PATH = os.getenv("DATABASE_PATH", "data/anime_channels.sqlite3")
+
+# Temporary writable database location by default.
+# For persistent storage, set DATABASE_PATH to a Render Persistent Disk path.
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH",
+    "/tmp/anime_channels.sqlite3",
+).strip()
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -34,10 +41,11 @@ logger = logging.getLogger("anime-auto-publisher")
 
 
 def connect_db():
-    folder = os.path.dirname(DATABASE_PATH)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH)
+    # Ensure the database directory exists and is writable.
+    folder = os.path.dirname(os.path.abspath(DATABASE_PATH))
+    os.makedirs(folder, exist_ok=True)
+
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -66,7 +74,10 @@ def normalize_name(value: str) -> str:
 
 def get_setting(key):
     with closing(connect_db()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (key,),
+        ).fetchone()
         return row["value"] if row else None
 
 
@@ -91,7 +102,9 @@ def get_route(anime_name):
 def parse_channel_id(value):
     value = value.strip()
     if not re.fullmatch(r"-?\d+", value):
-        raise ValueError("Channel must be a numeric Telegram channel ID, e.g. -1001234567890.")
+        raise ValueError(
+            "Channel must be a numeric Telegram channel ID, e.g. -1001234567890."
+        )
     return int(value)
 
 
@@ -132,8 +145,6 @@ def parse_post(text):
 
     anime_name = " ".join(lines[:episode_index]).strip(" \t-–—:|")
     if not anime_name:
-        # Allow an episode heading on the first line only if the anime title appears
-        # on the line immediately before it (already handled above).
         return None
 
     qualities = {}
@@ -142,22 +153,24 @@ def parse_post(text):
         r"\s*[-:–—]?\s*(https?://[^\s|<>]+)",
         re.IGNORECASE,
     )
+
+    # First check lines after the episode heading.
     for line in lines[episode_index + 1:]:
         for match in quality_re.finditer(line):
             quality = f"{match.group(1)}P"
             url = match.group(2).rstrip(".,;)")
-            parsed = urlparse(url)
-            if parsed.scheme in ("http", "https") and parsed.netloc:
+            parsed_url = urlparse(url)
+            if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                 qualities[quality] = url
 
+    # Some posts place download links on the episode heading itself.
     if not qualities:
-        # Some posts put download links on the same line as the episode.
         for line in lines[episode_index:]:
             for match in quality_re.finditer(line):
                 quality = f"{match.group(1)}P"
                 url = match.group(2).rstrip(".,;)")
-                parsed = urlparse(url)
-                if parsed.scheme in ("http", "https") and parsed.netloc:
+                parsed_url = urlparse(url)
+                if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                     qualities[quality] = url
 
     if not qualities:
@@ -184,33 +197,45 @@ def make_caption(anime_name, episode_number):
 
 
 def make_keyboard(qualities):
-    # Keep requested layout: two buttons on row one, remaining button on row two.
-    preferred = ["480P", "720P", "1080P", "360P", "240P", "144P", "540P", "576P", "1440P", "2160P"]
-    ordered = [q for q in preferred if q in qualities]
-    ordered.extend(q for q in qualities if q not in ordered)
+    # Buttons are arranged two per row.
+    preferred = [
+        "480P", "720P", "1080P", "360P", "240P",
+        "144P", "540P", "576P", "1440P", "2160P",
+    ]
+    ordered = [quality for quality in preferred if quality in qualities]
+    ordered.extend(quality for quality in qualities if quality not in ordered)
 
     buttons = [
         InlineKeyboardButton(f"📥 {quality}", url=qualities[quality])
         for quality in ordered
     ]
-    rows = []
-    for index in range(0, len(buttons), 2):
-        rows.append(buttons[index:index + 2])
+    rows = [
+        buttons[index:index + 2]
+        for index in range(0, len(buttons), 2)
+    ]
     return InlineKeyboardMarkup(rows)
 
 
 async def is_admin(update: Update) -> bool:
     user = update.effective_user
-    if not user:
+    message = update.effective_message
+
+    if not user or not message:
         return False
+
     if not ADMIN_IDS:
-        await update.effective_message.reply_text(
-            "⚠️ ADMIN_IDS is not configured. Add your Telegram numeric user ID in Render environment variables."
+        await message.reply_text(
+            "⚠️ ADMIN_IDS is not configured. Add your Telegram numeric user ID "
+            "in Render environment variables."
         )
         return False
+
     if user.id not in ADMIN_IDS:
-        await update.effective_message.reply_text("⛔ This command is restricted to the bot admin.")
+        await message.reply_text(
+            "⛔ This command is restricted to the bot admin."
+        )
         return False
+
     return True
 
 
@@ -234,6 +259,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update):
         return
+
     args = context.args
     if len(args) < 2:
         await update.effective_message.reply_text(
@@ -255,13 +281,18 @@ async def addanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         chat = await context.bot.get_chat(channel_id)
+
         with closing(connect_db()) as conn:
             conn.execute(
-                "INSERT INTO anime_routes(anime_key, anime_name, channel_id) VALUES(?, ?, ?) "
-                "ON CONFLICT(anime_key) DO UPDATE SET anime_name=excluded.anime_name, channel_id=excluded.channel_id",
+                "INSERT INTO anime_routes(anime_key, anime_name, channel_id) "
+                "VALUES(?, ?, ?) "
+                "ON CONFLICT(anime_key) DO UPDATE SET "
+                "anime_name=excluded.anime_name, "
+                "channel_id=excluded.channel_id",
                 (normalize_name(anime_name), anime_name, channel_id),
             )
             conn.commit()
+
         await update.effective_message.reply_text(
             f"✅ Registered: {anime_name}\n"
             f"📢 Destination: {chat.title or channel_id}\n"
@@ -270,8 +301,8 @@ async def addanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:
         logger.exception("Failed to register route")
         await update.effective_message.reply_text(
-            "❌ Couldn't access that channel. Make sure the bot is an administrator there "
-            "and that the numeric channel ID is correct.\n"
+            "❌ Couldn't access that channel. Make sure the bot is an administrator "
+            "there and that the numeric channel ID is correct.\n"
             f"Details: {exc}"
         )
 
@@ -279,55 +310,81 @@ async def addanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def removeanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update):
         return
+
     anime_name = " ".join(context.args).strip()
     if not anime_name:
-        await update.effective_message.reply_text("Usage: /removeanime Anime Name")
+        await update.effective_message.reply_text(
+            "Usage: /removeanime Anime Name"
+        )
         return
+
     with closing(connect_db()) as conn:
         cursor = conn.execute(
             "DELETE FROM anime_routes WHERE anime_key = ?",
             (normalize_name(anime_name),),
         )
         conn.commit()
+
     if cursor.rowcount:
-        await update.effective_message.reply_text(f"🗑️ Removed route for: {anime_name}")
+        await update.effective_message.reply_text(
+            f"🗑️ Removed route for: {anime_name}"
+        )
     else:
-        await update.effective_message.reply_text(f"ℹ️ No route found for: {anime_name}")
+        await update.effective_message.reply_text(
+            f"ℹ️ No route found for: {anime_name}"
+        )
 
 
 async def listanime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update):
         return
+
     with closing(connect_db()) as conn:
         rows = conn.execute(
-            "SELECT anime_name, channel_id FROM anime_routes ORDER BY anime_name COLLATE NOCASE"
+            "SELECT anime_name, channel_id FROM anime_routes "
+            "ORDER BY anime_name COLLATE NOCASE"
         ).fetchall()
+
     if not rows:
-        await update.effective_message.reply_text("No anime routes registered yet.")
+        await update.effective_message.reply_text(
+            "No anime routes registered yet."
+        )
         return
+
     lines = ["📚 Registered anime channels:"]
     for row in rows:
         lines.append(f"• {row['anime_name']} — `{row['channel_id']}`")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def setdefault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update):
         return
+
     if len(context.args) != 1:
-        await update.effective_message.reply_text("Usage: /setdefault -1001234567890")
+        await update.effective_message.reply_text(
+            "Usage: /setdefault -1001234567890"
+        )
         return
+
     try:
         channel_id = parse_channel_id(context.args[0])
         chat = await context.bot.get_chat(channel_id)
         set_setting("default_channel_id", channel_id)
+
         await update.effective_message.reply_text(
-            f"✅ Default channel set to {chat.title or channel_id}\n🆔 {channel_id}"
+            f"✅ Default channel set to {chat.title or channel_id}\n"
+            f"🆔 {channel_id}"
         )
     except Exception as exc:
         logger.exception("Failed to set default channel")
         await update.effective_message.reply_text(
-            "❌ Couldn't access that channel. Add the bot as an administrator and check the ID.\n"
+            "❌ Couldn't access that channel. Add the bot as an administrator "
+            "and check the ID.\n"
             f"Details: {exc}"
         )
 
@@ -335,18 +392,23 @@ async def setdefault(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def defaultchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update):
         return
+
     channel_id = get_setting("default_channel_id")
     if not channel_id:
         await update.effective_message.reply_text(
             "No default channel configured. Use /setdefault -1001234567890"
         )
         return
+
     try:
         chat = await context.bot.get_chat(int(channel_id))
         title = chat.title or str(channel_id)
     except Exception:
         title = "Unable to fetch channel title"
-    await update.effective_message.reply_text(f"📢 Default channel: {title}\n🆔 {channel_id}")
+
+    await update.effective_message.reply_text(
+        f"📢 Default channel: {title}\n🆔 {channel_id}"
+    )
 
 
 async def process_source_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -354,33 +416,42 @@ async def process_source_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not message or not message.text:
         return
 
-    source_id = SOURCE_CHANNEL_ID
-    if not source_id:
+    if not SOURCE_CHANNEL_ID:
         logger.error("SOURCE_CHANNEL_ID is not configured")
         return
+
     try:
-        expected_source_id = int(source_id)
+        expected_source_id = int(SOURCE_CHANNEL_ID)
     except ValueError:
         logger.error("SOURCE_CHANNEL_ID must be a numeric channel ID")
         return
 
-    if not update.effective_chat or update.effective_chat.id != expected_source_id:
+    if (
+        not update.effective_chat
+        or update.effective_chat.id != expected_source_id
+    ):
         return
 
     parsed = parse_post(message.text)
     if not parsed:
-        logger.info("Ignored source post: did not match anime/episode/quality-link format")
+        logger.info(
+            "Ignored source post: did not match anime/episode/quality-link format"
+        )
         return
 
     anime_name = parsed["anime_name"]
     route = get_route(anime_name)
+
     if route:
         destination_id = int(route["channel_id"])
         destination_name = route["anime_name"]
     else:
         default_id = get_setting("default_channel_id")
         if not default_id:
-            logger.warning("No route for %s and no default channel configured", anime_name)
+            logger.warning(
+                "No route for %s and no default channel configured",
+                anime_name,
+            )
             return
         destination_id = int(default_id)
         destination_name = "default channel"
@@ -403,7 +474,11 @@ async def process_source_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             destination_name,
         )
     except Exception:
-        logger.exception("Failed to publish %s to channel %s", anime_name, destination_id)
+        logger.exception(
+            "Failed to publish %s to channel %s",
+            anime_name,
+            destination_id,
+        )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -413,12 +488,20 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Set BOT_TOKEN in Render environment variables.")
-    if not SOURCE_CHANNEL_ID or not SOURCE_CHANNEL_ID.lstrip("-").isdigit():
-        raise RuntimeError("Set SOURCE_CHANNEL_ID to the numeric ID of your source channel.")
-    if not ADMIN_IDS:
-        logger.warning("ADMIN_IDS is empty; admin commands will not work until configured.")
 
+    if not SOURCE_CHANNEL_ID or not SOURCE_CHANNEL_ID.lstrip("-").isdigit():
+        raise RuntimeError(
+            "Set SOURCE_CHANNEL_ID to the numeric ID of your source channel."
+        )
+
+    if not ADMIN_IDS:
+        logger.warning(
+            "ADMIN_IDS is empty; admin commands will not work until configured."
+        )
+
+    logger.info("Using SQLite database: %s", DATABASE_PATH)
     init_db()
+
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -428,12 +511,14 @@ def main():
     application.add_handler(CommandHandler("setdefault", setdefault))
     application.add_handler(CommandHandler("defaultchannel", defaultchannel))
     application.add_handler(
-        MessageHandler(filters.ChatType.CHANNEL & filters.TEXT, process_source_post)
+        MessageHandler(
+            filters.ChatType.CHANNEL & filters.TEXT,
+            process_source_post,
+        )
     )
     application.add_error_handler(error_handler)
 
-    # Webhook-free long polling works on Render Web Services, but requires a lightweight
-    # HTTP server for Render's port check. This service uses a simple health endpoint.
+    # Lightweight HTTP server for Render's web-service port check.
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from threading import Thread
 
@@ -453,7 +538,10 @@ def main():
     Thread(target=server.serve_forever, daemon=True).start()
     logger.info("Health server listening on port %s", port)
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+    )
 
 
 if __name__ == "__main__":
