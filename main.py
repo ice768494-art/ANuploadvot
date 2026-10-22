@@ -109,19 +109,40 @@ def parse_channel_id(value):
 
 
 def parse_post(text):
-    """
-    Supported examples:
-      Tomb Raider King
-      Episode 12👇
+    """Parse an anime episode post, optional poster URL, and quality links.
+
+    Example:
+      Naruto Shippuden
+      Episode 12
+      Image: https://example.com/poster.jpg
       480P - https://example.com/480 | 720P - https://example.com/720
       1080P - https://example.com/1080
-
-    Also accepts EP 12, E12, S1 Episode 12, and quality/link pairs on one line.
     """
     if not text:
         return None
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(raw_lines) < 2:
+        return None
+
+    image_re = re.compile(
+        r"^\s*(?:image(?:\s*url)?|poster|thumbnail|photo)\s*[:=\-]?\s*"
+        r"(https?://\S+)\s*$",
+        re.IGNORECASE,
+    )
+
+    image_url = None
+    lines = []
+    for line in raw_lines:
+        image_match = image_re.match(line)
+        if image_match:
+            candidate = image_match.group(1).rstrip(".,;)")
+            parsed_image = urlparse(candidate)
+            if parsed_image.scheme in ("http", "https") and parsed_image.netloc:
+                image_url = candidate
+            continue
+        lines.append(line)
+
     if len(lines) < 2:
         return None
 
@@ -154,7 +175,6 @@ def parse_post(text):
         re.IGNORECASE,
     )
 
-    # First check lines after the episode heading.
     for line in lines[episode_index + 1:]:
         for match in quality_re.finditer(line):
             quality = f"{match.group(1)}P"
@@ -163,7 +183,7 @@ def parse_post(text):
             if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                 qualities[quality] = url
 
-    # Some posts place download links on the episode heading itself.
+    # Also accept quality links on the episode-heading line.
     if not qualities:
         for line in lines[episode_index:]:
             for match in quality_re.finditer(line):
@@ -180,6 +200,7 @@ def parse_post(text):
         "anime_name": anime_name,
         "episode_number": episode_number,
         "qualities": qualities,
+        "image_url": image_url,
     }
 
 
@@ -187,11 +208,13 @@ def make_caption(anime_name, episode_number):
     safe_name = html.escape(anime_name.upper())
     safe_episode = html.escape(episode_number)
     return (
-    f"{safe_name} | தமிழ் Official Dub\n\n"
-    f"Season : 01 | Episode : {safe_episode}\n\n"
-    "‼️ Note - Click The Below Button to Get Episodes 👇"
+        "╭━━━『 🔥 NEW EPISODE 』━━━╮\n\n"
+        f"<blockquote>🎬 Anime: {safe_name}\n"
+        f"📺 Episode: {safe_episode}\n"
+        "🎧 Audio: Tamil</blockquote>\n\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "📥 <b>DOWNLOAD LINKS</b>"
     )
-       
 
 
 def make_keyboard(qualities):
@@ -456,20 +479,45 @@ async def process_source_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     caption = make_caption(anime_name, parsed["episode_number"])
     keyboard = make_keyboard(parsed["qualities"])
+    image_url = parsed.get("image_url")
 
     try:
-        await context.bot.send_message(
-            chat_id=destination_id,
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+        if image_url:
+            try:
+                await context.bot.send_photo(
+                    chat_id=destination_id,
+                    photo=image_url,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                # If Telegram cannot load the supplied image URL, still publish the links.
+                logger.exception(
+                    "Photo publication failed; falling back to a text post"
+                )
+                await context.bot.send_message(
+                    chat_id=destination_id,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=destination_id,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+
         logger.info(
-            "Published %s Episode %s to %s",
+            "Published %s Episode %s to %s (photo=%s)",
             anime_name,
             parsed["episode_number"],
             destination_name,
+            bool(image_url),
         )
     except Exception:
         logger.exception(
