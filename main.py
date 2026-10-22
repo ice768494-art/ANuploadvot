@@ -188,7 +188,7 @@ def make_caption(anime_name, episode_number):
     safe_episode = html.escape(episode_number)
     return (
     f"{safe_name} | தமிழ் Official Dub\n\n"
-    f"Season : 01 | Episode : {safe_episode}\n"
+    f"Season : 01 | Episode : {safe_episode}\n\n"
     "‼️ Note - Click The Below Button to Get Episodes 👇"
     )
        
