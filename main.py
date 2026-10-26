@@ -109,19 +109,17 @@ def parse_channel_id(value):
 
 
 def parse_post(text):
-    """Parse an anime episode post, optional poster URL, and quality links.
+    """Parse anime name, season, episode, poster URL, and quality links."""
 
-    Example:
-      Naruto Shippuden
-      Episode 12
-      Image: https://example.com/poster.jpg
-      480P - https://example.com/480 | 720P - https://example.com/720
-      1080P - https://example.com/1080
-    """
     if not text:
         return None
 
-    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    raw_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
     if len(raw_lines) < 2:
         return None
 
@@ -133,19 +131,40 @@ def parse_post(text):
 
     image_url = None
     lines = []
+
     for line in raw_lines:
         image_match = image_re.match(line)
+
         if image_match:
             candidate = image_match.group(1).rstrip(".,;)")
             parsed_image = urlparse(candidate)
+
             if parsed_image.scheme in ("http", "https") and parsed_image.netloc:
                 image_url = candidate
+
             continue
+
         lines.append(line)
 
     if len(lines) < 2:
         return None
 
+    # Detect season number.
+    season_re = re.compile(
+        r"\b(?:season|s)\s*[-:#]?\s*(\d+)\b",
+        re.IGNORECASE,
+    )
+
+    season_number = "1"
+
+    for line in lines:
+        season_match = season_re.search(line)
+
+        if season_match:
+            season_number = season_match.group(1)
+            break
+
+    # Detect episode number.
     episode_re = re.compile(
         r"\b(?:(?:season|s)\s*\d+\s*[-:]?\s*)?"
         r"(?:episode|ep|e)\s*[-:#]?\s*(\d+(?:\.\d+)?)\b",
@@ -154,8 +173,10 @@ def parse_post(text):
 
     episode_index = None
     episode_number = None
+
     for index, line in enumerate(lines):
         match = episode_re.search(line)
+
         if match:
             episode_index = index
             episode_number = match.group(1)
@@ -164,11 +185,22 @@ def parse_post(text):
     if episode_index is None:
         return None
 
-    anime_name = " ".join(lines[:episode_index]).strip(" \t-–—:|")
+    # Extract anime name and format it using title().
+    anime_name = " ".join(
+        lines[:episode_index]
+    ).strip(" \t-–—:|")
+
+    # Remove season information from the anime name if it appears there.
+    anime_name = season_re.sub("", anime_name).strip(" \t-–—:|")
+
     if not anime_name:
         return None
 
+    anime_name = anime_name.title()
+
+    # Detect quality links.
     qualities = {}
+
     quality_re = re.compile(
         r"\b(144|240|360|480|540|576|720|1080|1440|2160)\s*[pP]\b"
         r"\s*[-:–—]?\s*(https?://[^\s|<>]+)",
@@ -179,7 +211,9 @@ def parse_post(text):
         for match in quality_re.finditer(line):
             quality = f"{match.group(1)}P"
             url = match.group(2).rstrip(".,;)")
+
             parsed_url = urlparse(url)
+
             if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                 qualities[quality] = url
 
@@ -189,7 +223,9 @@ def parse_post(text):
             for match in quality_re.finditer(line):
                 quality = f"{match.group(1)}P"
                 url = match.group(2).rstrip(".,;)")
+
                 parsed_url = urlparse(url)
+
                 if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                     qualities[quality] = url
 
@@ -198,21 +234,23 @@ def parse_post(text):
 
     return {
         "anime_name": anime_name,
+        "season_number": season_number,
         "episode_number": episode_number,
         "qualities": qualities,
         "image_url": image_url,
     }
 
 
-def make_caption(anime_name, episode_number):
-    safe_name = html.escape(anime_name.upper())
-    safe_episode = html.escape(episode_number)
-    return (
-    f"{safe_name} | தமிழ் Official Dub\n\n"
-    f"Season : 01 | Episode : {safe_episode}\n\n"
-    "‼️ Note - Click The Below Button to Get Episodes 👇"
-    )
+def make_caption(anime_name, season_number, episode_number):
+    safe_name = html.escape(anime_name.title())
+    safe_season = html.escape(str(season_number).zfill(2))
+    safe_episode = html.escape(str(episode_number))
 
+    return (
+        f"{safe_name} | தமிழ் Official Dub\n\n"
+        f"Season : {safe_season} | Episode : {safe_episode}\n\n"
+        "‼️ Note - Click The Below Button to Get Episodes 👇"
+    )
 
 def make_keyboard(qualities):
     # Buttons are arranged two per row.
@@ -474,7 +512,11 @@ async def process_source_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         destination_id = int(default_id)
         destination_name = "default channel"
 
-    caption = make_caption(anime_name, parsed["episode_number"])
+    caption = make_caption(
+    anime_name,
+    parsed["season_number"],
+    parsed["episode_number"],)
+
     keyboard = make_keyboard(parsed["qualities"])
     image_url = parsed.get("image_url")
 
